@@ -3,103 +3,113 @@ const http = require('http');
 const fs = require('fs').promises;
 const { XMLBuilder } = require('fast-xml-parser');
 
-// Налаштування XML парсера
+
 const xmlBuilder = new XMLBuilder({
-  ignoreAttributes: false,
   format: true,
-  arrayNodeName: "bank",
   suppressEmptyNode: true,
+  arrayNodeName: "bank" 
 });
 
-// Конфігурація командного рядка
 program
-  .requiredOption('-i, --input <path>', 'шлях до JSON файлу з даними')
+  .requiredOption('-i, --input <path>', 'шлях до JSON файлу')
   .requiredOption('-h, --host <address>', 'адреса сервера')
   .requiredOption('-p, --port <number>', 'порт сервера', parseInt)
   .parse(process.argv);
 
 const options = program.opts();
 
-// Асинхронна функція для читання JSON файлу
-async function readDataFile(filePath) {
-  try {
-    const data = await fs.readFile(filePath, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      throw new Error('Cannot find input file');
-    }
-    throw error;
-  }
-}
 
-// Функція для обробки та фільтрації даних банків
-function processBanksData(banksData, queryParams) {
-  let result = banksData;
+fs.access(options.input)
+  .then(() => {
+    console.log('Файл знайдено:', options.input);
+    
+    const server = http.createServer(async (req, res) => {
+      console.log('Отримано запит:', req.url);
+      
+      if (req.method === 'GET') {
+        try {
+          const url = new URL(req.url, `http://${options.host}:${options.port}`);
+          const queryParams = Object.fromEntries(url.searchParams);
+          
+          console.log('Параметри запиту:', queryParams);
 
-  // Фільтрація за статусом "Нормальний" (COD_STATE = 1)
-  if (queryParams.normal === 'true') {
-    result = result.filter(bank => bank.COD_STATE === 1);
-  }
+          const data = await fs.readFile(options.input, 'utf8');
+          const banksData = JSON.parse(data);
+          
+          console.log('Прочитано банків:', banksData.length);
 
-  // Визначення полів для виводу
-  const showMfo = queryParams.mfo === 'true';
-  const showState = queryParams.normal === 'true';
+          // Фільтрація даних
+          let filteredData = banksData;
+          
+          if (queryParams.normal === 'true') {
+            filteredData = filteredData.filter(bank => bank.COD_STATE === 1);
+            console.log('Після фільтрації normal:', filteredData.length);
+          }
 
-  // Форматування даних для XML
-  return result.map(bank => {
-    const bankOutput = {};
-    if (showMfo) {
-      bankOutput.mfo_code = bank.MFO;
-    }
-    bankOutput.name = bank.NAME;
-    if (showState) {
-      bankOutput.state_code = bank.COD_STATE;
-    }
-    return bankOutput;
-  });
-}
+          // Форматування даних для XML
+          const showMfo = queryParams.mfo === 'true';
+          const showState = queryParams.normal === 'true';
+          
+          const xmlData = filteredData.map(bank => {
+            const bankInfo = {};
+            
+            bankInfo.name = bank.NAME || bank.SHORTNAME || 'Невідомий банк';
+            
+            if (showMfo) {
+              bankInfo.mfo_code = bank.MFO || '000000';
+            }
+      
+            if (showState) {
+              bankInfo.state_code = bank.COD_STATE !== undefined ? bank.COD_STATE : 0;
+            }
+            
+            return bankInfo;
+          });
 
-// Створення HTTP сервера
-const server = http.createServer(async (req, res) => {
-  console.log(`Отримано запит: ${req.method} ${req.url}`);
+          console.log('Дані для XML:', xmlData.length, 'елементів');
 
-  if (req.method === 'GET') {
-    try {
-      // Парсинг URL та параметрів запиту
-      const url = new URL(req.url, `http://${options.host}:${options.port}`);
-      const queryParams = Object.fromEntries(url.searchParams);
+          const xmlObject = {
+            banks: {
+              bank: xmlData
+            }
+          };
 
-      // Читання та обробка даних
-      const rawData = await readDataFile(options.input);
-      const processedData = processBanksData(rawData, queryParams);
+          // Генеруємо XML
+          const xmlResponse = xmlBuilder.build(xmlObject);
+          console.log('XML успішно згенеровано');
 
-      // Формування XML відповіді
-      const xmlObject = {
-        banks: {
-          bank: processedData
+         
+          res.writeHead(200, { 
+            'Content-Type': 'application/xml',
+            'Access-Control-Allow-Origin': '*'
+          });
+          res.end(xmlResponse);
+
+        } catch (error) {
+          console.error('Помилка обробки запиту:', error);
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Помилка сервера: ' + error.message);
         }
-      };
+      } else {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Метод не підтримується');
+      }
+    });
 
-      const xmlResponse = xmlBuilder.build(xmlObject);
+    
+    server.listen(options.port, options.host, () => {
+      console.log(`=== Сервер запущено ===`);
+      console.log(`Адреса: http://${options.host}:${options.port}`);
+      console.log(`Файл даних: ${options.input}`);
+      console.log(`Для тестування відкрий в браузері:`);
+      console.log(`- Всі дані: http://${options.host}:${options.port}/`);
+      console.log(`- Тільки нормальні банки: http://${options.host}:${options.port}/?normal=true`);
+      console.log(`- З МФО: http://${options.host}:${options.port}/?mfo=true`);
+      console.log(`- Все разом: http://${options.host}:${options.port}/?mfo=true&normal=true`);
+    });
 
-  
-      res.writeHead(200, { 'Content-Type': 'application/xml' });
-      res.end(xmlResponse);
-
-    } catch (error) {
-      console.error('Помилка обробки запиту:', error.message);
-      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end(`Помилка сервера: ${error.message}`);
-    }
-  } else {
-    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Метод не підтримується');
-  }
-});
-
-
-server.listen(options.port, options.host, () => {
-  console.log(`Сервер запущено на http://${options.host}:${options.port}`);
-  console.log(`Використовується файл даних: ${options.input}`);
-});
+  })
+  .catch((error) => {
+    console.error('Cannot find input file');
+    process.exit(1);
+  });
